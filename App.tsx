@@ -121,8 +121,10 @@ const App: React.FC = () => {
           sourceLang, 
           targetLang
         ),
-        inputAudioTranscription: { model: MODEL_NAME }, 
-        outputAudioTranscription: { model: MODEL_NAME }, 
+        // Fix: Pass empty objects to enable transcription. 
+        // Passing { model: ... } causes "Request contains an invalid argument" error.
+        inputAudioTranscription: {}, 
+        outputAudioTranscription: {}, 
       };
 
       const sessionPromise = ai.live.connect({
@@ -231,14 +233,22 @@ const App: React.FC = () => {
                }
             }
           },
-          onclose: () => {
+          onclose: (event) => {
             setConnectionState('disconnected');
             stopAudio();
+            console.log("Connection closed", event);
           },
-          onerror: (err) => {
-            console.error(err);
+          onerror: (err: any) => {
+            console.error("Live API Error:", err);
             setConnectionState('error');
-            setError("Connection error occurred.");
+            
+            // Try to extract a meaningful error message
+            let errorMessage = "Connection error occurred.";
+            if (err.message) errorMessage = err.message;
+            if (err.statusText) errorMessage += ` (${err.statusText})`;
+            if (errorMessage.includes("403")) errorMessage = "403 Forbidden: Check API Key & Billing.";
+            
+            setError(errorMessage);
             stopAudio();
           }
         }
@@ -247,8 +257,12 @@ const App: React.FC = () => {
       await sessionPromise;
 
     } catch (err: any) {
-      console.error(err);
-      setError(err.message || "Failed to start session.");
+      console.error("Setup Error:", err);
+      let msg = err.message || "Failed to start session.";
+      if (msg.includes("403") || msg.includes("permission")) {
+         msg = "Access Denied (403). Ensure your API Key has Billing enabled for this model.";
+      }
+      setError(msg);
       setConnectionState('disconnected');
       stopAudio();
     }
@@ -364,7 +378,8 @@ const App: React.FC = () => {
                </div>
                
                {error && (
-                 <div className="p-3 bg-red-900/30 border border-red-800 rounded-lg text-red-200 text-sm mb-4">
+                 <div className="p-3 bg-red-900/30 border border-red-800 rounded-lg text-red-200 text-sm mb-4 break-words">
+                   <strong className="block mb-1 text-red-100">Error:</strong>
                    {error}
                  </div>
                )}
