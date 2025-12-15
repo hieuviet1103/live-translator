@@ -22,7 +22,7 @@ const App: React.FC = () => {
   const [sourceLang, setSourceLang] = useState('vi');
   const [targetLang, setTargetLang] = useState('en');
   const [isMicMuted, setIsMicMuted] = useState(false);
-  const [isSpeakerMuted, setIsSpeakerMuted] = useState(false);
+  const [isSpeakerMuted, setIsSpeakerMuted] = useState(false); // Controls "Voice" output
   const [error, setError] = useState<string | null>(null);
 
   // --- Refs ---
@@ -89,7 +89,13 @@ const App: React.FC = () => {
     }
   }, []);
 
-  // --- Live API Logic ---
+  // --- Logic ---
+  const swapLanguages = () => {
+    if (connectionState !== 'disconnected') return;
+    setSourceLang(targetLang);
+    setTargetLang(sourceLang);
+  };
+
   const connect = async () => {
     if (!process.env.API_KEY) {
       setError("Missing API Key in environment variables.");
@@ -112,11 +118,11 @@ const App: React.FC = () => {
           voiceConfig: { prebuiltVoiceConfig: { voiceName: 'Puck' } },
         },
         systemInstruction: getSystemInstruction(
-          sourceLang === 'auto' ? 'Any Language' : sourceLang, 
+          sourceLang, 
           targetLang
         ),
-        inputAudioTranscription: { model: MODEL_NAME }, // Enable input transcription
-        outputAudioTranscription: { model: MODEL_NAME }, // Enable output transcription
+        inputAudioTranscription: { model: MODEL_NAME }, 
+        outputAudioTranscription: { model: MODEL_NAME }, 
       };
 
       const sessionPromise = ai.live.connect({
@@ -128,23 +134,20 @@ const App: React.FC = () => {
             
             // Connect Mic Stream to Processor
             if (inputContextRef.current) {
-              // Ensure context is resumed (browsers block auto-play)
               await inputContextRef.current.resume();
               
               const source = inputContextRef.current.createMediaStreamSource(stream);
               mediaStreamSourceRef.current = source;
               
-              // Use ScriptProcessor for raw PCM access (bufferSize, inputChannels, outputChannels)
               const processor = inputContextRef.current.createScriptProcessor(4096, 1, 1);
               scriptProcessorRef.current = processor;
 
               processor.onaudioprocess = (e) => {
-                if (isMicMuted) return; // Don't send data if muted
+                if (isMicMuted) return; 
 
                 const inputData = e.inputBuffer.getChannelData(0);
                 const blob = createAudioBlob(inputData);
                 
-                // Send to Gemini
                 sessionPromise.then(session => {
                   session.sendRealtimeInput({ media: blob });
                 });
@@ -157,17 +160,11 @@ const App: React.FC = () => {
           onmessage: async (msg: LiveServerMessage) => {
             const { serverContent } = msg;
 
-            // 1. Handle Transcription (User or Model)
-            if (serverContent?.modelTurn?.parts?.[0]?.text || serverContent?.outputTranscription?.text) {
-                // Not usually sent this way in Live API audio mode, but checking just in case
-            }
-
             // Handle Streaming Transcription updates
             if (serverContent?.inputTranscription) {
                const text = serverContent.inputTranscription.text;
                if (text) {
                  currentInputTransRef.current += text;
-                 // Update the current "User" message in UI (streaming effect)
                  updateLastMessage(MessageRole.USER, currentInputTransRef.current, false);
                }
             }
@@ -176,12 +173,11 @@ const App: React.FC = () => {
                const text = serverContent.outputTranscription.text;
                if (text) {
                  currentOutputTransRef.current += text;
-                 // Update the current "Model" message in UI (streaming effect)
                  updateLastMessage(MessageRole.MODEL, currentOutputTransRef.current, false);
                }
             }
 
-            // Turn Complete: Finalize messages
+            // Turn Complete
             if (serverContent?.turnComplete) {
               if (currentInputTransRef.current) {
                  updateLastMessage(MessageRole.USER, currentInputTransRef.current, true);
@@ -193,14 +189,14 @@ const App: React.FC = () => {
               }
             }
 
-            // 2. Handle Audio Output
+            // Handle Audio Output
+            // Only play if speaker is NOT muted
             const audioData = serverContent?.modelTurn?.parts?.[0]?.inlineData?.data;
             if (audioData && outputContextRef.current && !isSpeakerMuted) {
               try {
                 const uint8Data = base64ToUint8Array(audioData);
                 const audioBuffer = await decodeAudioData(uint8Data, outputContextRef.current);
                 
-                // Schedule playback
                 nextStartTimeRef.current = Math.max(
                   nextStartTimeRef.current,
                   outputContextRef.current.currentTime
@@ -223,14 +219,12 @@ const App: React.FC = () => {
               }
             }
 
-            // 3. Handle Interruptions
+            // Handle Interruptions
             if (serverContent?.interrupted) {
-               // Stop audio immediately
                audioSourcesRef.current.forEach(s => s.stop());
                audioSourcesRef.current.clear();
                nextStartTimeRef.current = outputContextRef.current?.currentTime || 0;
                
-               // Finalize partially received model message if needed
                if (currentOutputTransRef.current) {
                  updateLastMessage(MessageRole.MODEL, currentOutputTransRef.current + " [Interrupted]", true);
                  currentOutputTransRef.current = '';
@@ -250,7 +244,6 @@ const App: React.FC = () => {
         }
       });
 
-      // Wait for connection
       await sessionPromise;
 
     } catch (err: any) {
@@ -262,31 +255,17 @@ const App: React.FC = () => {
   };
 
   const disconnect = () => {
-    // We can't cleanly "close" the live client session object directly via a method in the SDK 
-    // without holding the session reference, but reloading or stopping inputs effectively ends it 
-    // from the user perspective until the session times out server side or we implement the cleanup 
-    // if we stored the session object.
-    // For this implementation, we force cleanup of local resources.
     stopAudio();
     setConnectionState('disconnected');
-    // Note: In a real app, you might want to signal the server to close.
-    // However, simply reloading or dropping the connection works for prototypes.
     window.location.reload(); 
   };
 
-  // --- Helper to update messages state ---
   const updateLastMessage = (role: MessageRole, text: string, isFinal: boolean) => {
     setMessages(prev => {
       const lastMsg = prev[prev.length - 1];
-      
-      // If the last message is same role and not final, update it
       if (lastMsg && lastMsg.role === role && !lastMsg.isFinal) {
-        const updated = { ...lastMsg, text, isFinal };
-        return [...prev.slice(0, -1), updated];
+        return [...prev.slice(0, -1), { ...lastMsg, text, isFinal }];
       } 
-      
-      // If sending a new message for a different role, or previous was final
-      // But only if text is not empty
       if (text.trim().length > 0) {
         return [...prev, {
           id: Date.now().toString(),
@@ -296,11 +275,9 @@ const App: React.FC = () => {
           timestamp: Date.now()
         }];
       }
-
       return prev;
     });
   };
-
 
   return (
     <div className="flex flex-col h-screen bg-gray-950 text-white overflow-hidden font-sans">
@@ -337,41 +314,52 @@ const App: React.FC = () => {
       {/* Main Content Area */}
       <main className="flex-1 flex flex-col md:flex-row overflow-hidden relative">
         
-        {/* Settings Sidebar (Desktop) / Top (Mobile) */}
-        <aside className="w-full md:w-80 bg-gray-900 border-r border-gray-800 p-6 flex flex-col gap-8 z-20 shadow-xl">
+        {/* Settings Sidebar */}
+        <aside className="w-full md:w-80 bg-gray-900 border-r border-gray-800 p-6 flex flex-col gap-6 z-20 shadow-xl">
             <div>
-              <h2 className="text-lg font-semibold text-white mb-4 flex items-center gap-2">
+              <h2 className="text-lg font-semibold text-white mb-6 flex items-center gap-2">
                 <span className="text-blue-400">⚙️</span> Configuration
               </h2>
               
-              <div className="space-y-6">
+              <div className="flex flex-col gap-2">
                 <LanguageSelector 
-                  label="I Speak (Source)" 
+                  label="Language A (Source)" 
                   selectedCode={sourceLang} 
                   onSelect={setSourceLang}
                   disabled={connectionState === 'connected'}
                 />
                 
-                <div className="flex items-center justify-center">
-                  <div className="p-2 rounded-full bg-gray-800 text-gray-400">
-                    <svg className="w-5 h-5 rotate-90 md:rotate-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M8 7h12m0 0l-4-4m4 4l-4 4m0 6H4m0 0l4 4m-4-4l4-4" />
+                <div className="flex items-center justify-center -my-2 z-10">
+                  <button 
+                    onClick={swapLanguages}
+                    disabled={connectionState === 'connected'}
+                    className="p-2 rounded-full bg-gray-800 border border-gray-700 text-blue-400 hover:bg-gray-700 hover:text-blue-300 transition-colors disabled:opacity-50 disabled:cursor-not-allowed shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                    title="Swap Languages"
+                  >
+                    <svg className="w-5 h-5 rotate-90 md:rotate-90" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                       <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M7 16V4m0 0L3 8m4-4l4 4m6 0v12m0 0l4-4m-4 4l-4-4" />
                     </svg>
-                  </div>
+                  </button>
                 </div>
 
                 <LanguageSelector 
-                  label="Translate To (Target)" 
+                  label="Language B (Target)" 
                   selectedCode={targetLang} 
                   onSelect={setTargetLang}
                   disabled={connectionState === 'connected'}
                 />
               </div>
+
+              <div className="mt-4 p-3 bg-blue-900/20 border border-blue-800/50 rounded-lg">
+                <p className="text-xs text-blue-200">
+                  <span className="font-bold">✨ AI Enhanced:</span> Optimized for robustness against background noise and varied accents.
+                </p>
+              </div>
             </div>
 
             <div className="mt-auto pt-6 border-t border-gray-800">
                <div className="mb-4">
-                 <p className="text-sm text-gray-400 mb-2">Audio Status</p>
+                 <p className="text-sm text-gray-400 mb-2">Audio Visualizer</p>
                  <AudioVisualizer isActive={connectionState === 'connected' && !isMicMuted} />
                </div>
                
@@ -387,7 +375,7 @@ const App: React.FC = () => {
                    className="w-full py-4 bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-500 hover:to-indigo-500 text-white font-bold rounded-xl shadow-lg hover:shadow-blue-500/25 transition-all transform hover:-translate-y-0.5 active:scale-95 flex items-center justify-center gap-2"
                  >
                    <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M19 11a7 7 0 01-7 7m0 0a7 7 0 01-7-7m7 7v4m0 0H8m4 0h4m-4-8a3 3 0 01-3-3V5a3 3 0 116 0v6a3 3 0 01-3 3z"></path></svg>
-                   Start Live Translation
+                   Start Live Session
                  </button>
                ) : (
                  <div className="grid grid-cols-2 gap-3">
@@ -396,16 +384,16 @@ const App: React.FC = () => {
                       className={`py-3 rounded-lg font-medium transition-colors flex items-center justify-center gap-2 ${isMicMuted ? 'bg-red-500/20 text-red-400 border border-red-500/30' : 'bg-gray-800 hover:bg-gray-700 text-white border border-gray-700'}`}
                     >
                       {isMicMuted ? (
-                         <><svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M19 11a7 7 0 01-7 7m0 0a7 7 0 01-7-7m7 7v4m0 0H8m4 0h4m-4-8a3 3 0 01-3-3V5a3 3 0 116 0v6a3 3 0 01-3 3z" /><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M3 3l18 18" /></svg> Muted</>
+                         <><svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M19 11a7 7 0 01-7 7m0 0a7 7 0 01-7-7m7 7v4m0 0H8m4 0h4m-4-8a3 3 0 01-3-3V5a3 3 0 116 0v6a3 3 0 01-3 3z" /><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M3 3l18 18" /></svg> Mic Off</>
                       ) : (
-                         <><svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M19 11a7 7 0 01-7 7m0 0a7 7 0 01-7-7m7 7v4m0 0H8m4 0h4m-4-8a3 3 0 01-3-3V5a3 3 0 116 0v6a3 3 0 01-3 3z" /></svg> Active</>
+                         <><svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M19 11a7 7 0 01-7 7m0 0a7 7 0 01-7-7m7 7v4m0 0H8m4 0h4m-4-8a3 3 0 01-3-3V5a3 3 0 116 0v6a3 3 0 01-3 3z" /></svg> Mic On</>
                       )}
                     </button>
                     <button
                       onClick={disconnect}
                       className="py-3 bg-gray-800 hover:bg-red-900/50 hover:text-red-400 border border-gray-700 hover:border-red-800 text-gray-300 rounded-lg font-medium transition-colors"
                     >
-                      Disconnect
+                      End
                     </button>
                  </div>
                )}
@@ -425,7 +413,7 @@ const App: React.FC = () => {
                   </svg>
                 </div>
                 <p className="text-xl font-light">Conversation history will appear here.</p>
-                <p className="text-sm mt-2">Press 'Start Live Translation' to begin.</p>
+                <p className="text-sm mt-2">Press 'Start Live Session' to begin.</p>
               </div>
             ) : (
               messages.map((msg) => (
@@ -435,24 +423,30 @@ const App: React.FC = () => {
             <div ref={messagesEndRef} />
           </div>
 
-          {/* Controls Overlay (Only visible when connected) */}
+          {/* Controls Overlay (Output Mode) */}
           {connectionState === 'connected' && (
-             <div className="absolute bottom-6 left-1/2 transform -translate-x-1/2 flex items-center gap-4 z-10 bg-gray-900/80 backdrop-blur-md px-6 py-3 rounded-full border border-gray-700 shadow-2xl">
-                <button 
-                  onClick={() => setIsSpeakerMuted(!isSpeakerMuted)}
-                  className={`p-3 rounded-full transition-all ${isSpeakerMuted ? 'bg-red-500/20 text-red-400' : 'bg-gray-800 text-blue-400 hover:bg-gray-700'}`}
-                  title={isSpeakerMuted ? "Unmute AI Voice" : "Mute AI Voice"}
-                >
-                  {isSpeakerMuted ? (
-                    <svg className="w-6 h-6" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M5.586 15H4a1 1 0 01-1-1v-4a1 1 0 011-1h1.586l4.707-4.707C10.923 3.663 12 4.109 12 5v14c0 .891-1.077 1.337-1.707.707L5.586 15z" strokeDasharray="20" strokeDashoffset="0"><animate attributeName="stroke-dashoffset" from="0" to="20" dur="0.5s" fill="freeze"/></path><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M17 14l2-2m0 0l2-2m-2 2l-2-2m2 2l2 2" /></svg>
-                  ) : (
-                    <svg className="w-6 h-6" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M15.536 8.464a5 5 0 010 7.072m2.828-9.9a9 9 0 010 12.728M5.586 15H4a1 1 0 01-1-1v-4a1 1 0 011-1h1.586l4.707-4.707C10.923 3.663 12 4.109 12 5v14c0 .891-1.077 1.337-1.707.707L5.586 15z" /></svg>
-                  )}
-                </button>
-                <div className="h-8 w-px bg-gray-700"></div>
-                <div className="text-sm text-gray-300 whitespace-nowrap">
-                   {isSpeakerMuted ? "Text Only Mode" : "Voice & Text Mode"}
-                </div>
+             <div className="absolute bottom-6 left-1/2 transform -translate-x-1/2 z-10">
+               <div className="flex items-center gap-1 bg-gray-900/90 backdrop-blur-md p-1.5 rounded-full border border-gray-700 shadow-2xl">
+                  <button 
+                    onClick={() => setIsSpeakerMuted(false)}
+                    className={`px-4 py-2 rounded-full text-sm font-medium transition-all flex items-center gap-2 ${!isSpeakerMuted ? 'bg-blue-600 text-white shadow-lg' : 'text-gray-400 hover:text-white hover:bg-gray-800'}`}
+                  >
+                    <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M15.536 8.464a5 5 0 010 7.072m2.828-9.9a9 9 0 010 12.728M5.586 15H4a1 1 0 01-1-1v-4a1 1 0 011-1h1.586l4.707-4.707C10.923 3.663 12 4.109 12 5v14c0 .891-1.077 1.337-1.707.707L5.586 15z" />
+                    </svg>
+                    Speech & Text
+                  </button>
+                  <button 
+                    onClick={() => setIsSpeakerMuted(true)}
+                    className={`px-4 py-2 rounded-full text-sm font-medium transition-all flex items-center gap-2 ${isSpeakerMuted ? 'bg-gray-700 text-white shadow-lg' : 'text-gray-400 hover:text-white hover:bg-gray-800'}`}
+                  >
+                    <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M5.586 15H4a1 1 0 01-1-1v-4a1 1 0 011-1h1.586l4.707-4.707C10.923 3.663 12 4.109 12 5v14c0 .891-1.077 1.337-1.707.707L5.586 15z" />
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M17 14l2-2m0 0l2-2m-2 2l-2-2m2 2l2 2" />
+                    </svg>
+                    Text Only
+                  </button>
+               </div>
              </div>
           )}
         </section>
